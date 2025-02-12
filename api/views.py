@@ -1,4 +1,6 @@
 # api/views.py
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -15,6 +17,39 @@ MIN_PROGRESS_DISTANCE = 50
 MPG = 10 # miles per gallon
 
 class OptimalRouteView(APIView):
+    @swagger_auto_schema(
+        operation_description="Get an optimized route with fuel stops",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=["start_address", "end_address"],
+            properties={
+                "start_address": openapi.Schema(type=openapi.TYPE_STRING, description="Starting address"),
+                "end_address": openapi.Schema(type=openapi.TYPE_STRING, description="Ending address"),
+            },
+        ),
+        responses={
+            200: openapi.Response("Success", openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    "route": openapi.Schema(type=openapi.TYPE_STRING, description="Route geometry"),
+                    "fuel_stops": openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(
+                        type=openapi.TYPE_OBJECT,
+                        properties={
+                            "name": openapi.Schema(type=openapi.TYPE_STRING),
+                            "latitude": openapi.Schema(type=openapi.TYPE_NUMBER),
+                            "longitude": openapi.Schema(type=openapi.TYPE_NUMBER),
+                            "fuel_price_per_gallon": openapi.Schema(type=openapi.TYPE_NUMBER),
+                            "fuel_cost": openapi.Schema(type=openapi.TYPE_NUMBER),
+                        },
+                    )),
+                    "total_distance": openapi.Schema(type=openapi.TYPE_NUMBER),
+                    "total_fuel_cost": openapi.Schema(type=openapi.TYPE_NUMBER),
+                },
+            )),
+            400: "Bad Request",
+            500: "Internal Server Error",
+        },
+    )
     def post(self, request):
         try:
             start_address = request.data.get('start_address')
