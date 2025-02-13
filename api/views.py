@@ -3,18 +3,119 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from rest_framework.views import APIView
 from rest_framework.response import Response
+import requests
 from rest_framework import status
-from .services import geocode_address, get_route
+from .services import geocode_address, get_route, find_optimal_fuel_stops, is_on_route
 import logging
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponse
+from django.shortcuts import render
+from folium import plugins
 from api.models import FuelStation
 from api.services import haversine_distance as haversine
-
+import folium
+import polyline
+import webbrowser
+from django.test import RequestFactory
+import json
+from django.middleware.csrf import get_token
 logger = logging.getLogger(__name__)
-
+from django.views.decorators.csrf import csrf_exempt
 MAX_FUEL_RANGE = 500 
 MIN_PROGRESS_DISTANCE = 50  
 MPG = 10 # miles per gallon
+
+def save_and_open_map(map_object, filename="route_map.html"):
+    map_object.save(filename)
+    webbrowser.open(filename)  # Open the saved file in the default web browser
+
+@csrf_exempt
+def display_route(request):
+    if request.method == 'POST':
+        try:
+            data = json.loads(request.body.decode('utf-8'))
+            start_address = data.get('start_address')
+            end_address = data.get('end_address')
+
+            if not start_address or not end_address:
+                return render(request, 'route_map.html', {'error': 'Missing required addresses.', 'success': False})
+
+            # Call API
+            api_url = 'http://localhost:8000/api/optimal-route/'
+            payload = {'start_address': start_address, 'end_address': end_address}
+            response = requests.post(api_url, json=payload)
+
+            # Debugging output
+            print("API Status Code:", response.status_code)
+            print("API Response:", response.text[:500])
+
+            if response.status_code != 200:
+                return render(request, 'route_map.html', {'error': f'API Error: {response.text}', 'success': False})
+
+            # Parse JSON
+            route_data = response.json()
+            if 'route' not in route_data or 'coordinates' not in route_data['route']:
+                return render(request, 'route_map.html', {'error': 'Invalid route data.', 'success': False})
+
+            coordinates = route_data['route']['coordinates']
+            if not coordinates or len(coordinates) < 2:
+                return render(request, 'route_map.html', {'error': 'No valid route data received.', 'success': False})
+
+            # Flip coordinates (lon, lat) → (lat, lon)
+            points = [(lat, lon) for lon, lat in coordinates]
+
+            # Debugging output
+            print(f"First 5 route points: {points[:5]}")
+
+            # Create map centered on first point
+            m = folium.Map(location=points[0], zoom_start=10)
+
+            # Draw the route
+            folium.PolyLine(
+                points, 
+                color='blue', 
+                weight=5, 
+                opacity=0.8,
+                smooth_factor=1.0,
+                line_cap='round'
+            ).add_to(m)
+
+            # Add fuel stops
+            for stop in route_data['fuel_stops']:
+                popup_html = f"""
+                    <div style='width: 200px'>
+                        <h4>{stop.get('name', 'Unknown')}</h4>
+                        <p>Distance: {stop.get('distance_from_last_stop', 'N/A')} miles</p>
+                        <p>Fuel Price: ${stop.get('fuel_price_per_gallon', 'N/A')}/gallon</p>
+                        <p>Fuel Cost: ${stop.get('fuel_cost', 'N/A')}</p>
+                    </div>
+                """
+                folium.Marker(
+                    location=[stop['latitude'], stop['longitude']],
+                    popup=folium.Popup(popup_html, max_width=300),
+                    icon=folium.Icon(color='red', icon='info-sign')
+                ).add_to(m)
+
+            # Fit bounds to route
+            if points:
+                m.fit_bounds(points)
+
+            # Save and open the map in a new tab
+            save_and_open_map(m)
+
+            context = {
+                'map': m._repr_html_(),
+                'total_distance': round(route_data.get('total_distance', 0), 2),
+                'total_fuel_cost': route_data.get('total_fuel_cost', 0),
+                'success': True
+            }
+
+        except Exception as e:
+            context = {'error': f'Unexpected error: {str(e)}', 'success': False}
+
+        return render(request, 'route_map.html', context)
+
+    return render(request, 'route_map.html', {'success': False})
+
 
 class OptimalRouteView(APIView):
     @swagger_auto_schema(
@@ -78,12 +179,24 @@ class OptimalRouteView(APIView):
             remaining_distance = total_distance
             fuel_remaining = MAX_FUEL_RANGE 
 
+            if total_distance <= MAX_FUEL_RANGE:
+                logger.info("No fuel stop required for this trip.")
+                fuel_stops.append({'name': 'Final Destination', 'latitude': end_coords[0], 'longitude': end_coords[1]})
+                return Response({
+                    'route': route['routes'][0]['geometry'],
+                    'fuel_stops': fuel_stops,
+                    'total_distance': total_distance,
+                    'total_fuel_cost': round(total_fuel_cost, 2)
+                })
+
             while remaining_distance > 0:
                 # Get all fuel stations within MAX_FUEL_RANGE
                 reachable_stations = [
                     station for station in FuelStation.objects.all()
                     if haversine(current_lat, current_lon, station.latitude, station.longitude) <= fuel_remaining
                     and haversine(station.latitude, station.longitude, end_coords[0], end_coords[1]) < remaining_distance
+                    or (total_distance <= 500 and is_on_route(route, station.latitude, station.longitude))    
+                    # and is_on_route(route, station.latitude, station.longitude)  
                 ]
 
                 if not reachable_stations:
@@ -130,7 +243,7 @@ class OptimalRouteView(APIView):
                 logger.info(f"Stopping at {next_station.name}, Distance: {distance_to_station:.2f} miles, Fuel Cost: ${fuel_cost:.2f}")
 
                 if remaining_distance <= MAX_FUEL_RANGE: 
-                    fuel_stops.append({'name': 'Final Destination', 'latitude': end_coords[0], 'longitude': end_coords[1]})
+                    fuel_stops.append({'name': 'Final Destination', 'latitude': end_coords[0], 'longitude': end_coords[1], 'distance_from_last_stop':total_distance,'fuel_cost':round(total_fuel_cost)})
                     logger.info("Reached final destination.")
                     break
 
