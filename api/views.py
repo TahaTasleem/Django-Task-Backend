@@ -195,8 +195,6 @@ class OptimalRouteView(APIView):
                     station for station in FuelStation.objects.all()
                     if haversine(current_lat, current_lon, station.latitude, station.longitude) <= fuel_remaining
                     and haversine(station.latitude, station.longitude, end_coords[0], end_coords[1]) < remaining_distance
-                    or (total_distance <= 500 and is_on_route(route, station.latitude, station.longitude))    
-                    # and is_on_route(route, station.latitude, station.longitude)  
                 ]
 
                 if not reachable_stations:
@@ -243,7 +241,7 @@ class OptimalRouteView(APIView):
                 logger.info(f"Stopping at {next_station.name}, Distance: {distance_to_station:.2f} miles, Fuel Cost: ${fuel_cost:.2f}")
 
                 if remaining_distance <= MAX_FUEL_RANGE: 
-                    fuel_stops.append({'name': 'Final Destination', 'latitude': end_coords[0], 'longitude': end_coords[1], 'distance_from_last_stop':total_distance,'fuel_cost':round(total_fuel_cost)})
+                    fuel_stops.append({'name': 'Final Destination', 'latitude': end_coords[0], 'longitude': end_coords[1], 'distance_from_last_stop':total_distance,'fuel_cost':round(total_fuel_cost,2)})
                     logger.info("Reached final destination.")
                     break
 
